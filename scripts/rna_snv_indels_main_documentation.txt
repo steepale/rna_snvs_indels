@@ -4,7 +4,7 @@
 #
 #        USAGE: for documentation purposes, scripts inside
 #
-#  DESCRIPTION:  This script serves as a step by step documentation script and development script for performing oncoprint array preparations for GenVisR in R
+#  DESCRIPTION:  This script serves as a step by step documentation script and development script for calling SNVs and Indels from rna and comparing them to DNA calls
 #                
 # REQUIREMENTS:  ---
 #        NOTES:  ---
@@ -13,9 +13,62 @@
 #				         USDA ARS Avian Disease and Oncology Lab (ADOL), East Lansing, MI, United States
 #				         Technical University of Munich (TUM), Weihenstephan, Germany
 #      VERSION:  1.0
-#      CREATED:  2017.02.17
+#      CREATED:  2017.04.13
 #     REVISION:  
 #===============================================================================
 
-# Permanent PROJECT DIRECTORY (TUM Cluster)
-cd /home/proj/MDW_genomics/steepale/oncoprint
+# Permanent PROJECT DIRECTORY (MacBook Pro)
+cd /Users/Alec/Documents/Bioinformatics/MDV_Project/rna_snvs_indels
+
+# Transfer the custom filtered and final somatic SNV and INDEL text file from TUM cluster to macbook
+rsync -avp \
+a.steep@barcelona.binfo.wzw.tum.de:/home/proj/MDW_genomics/steepale/pathway_analysis/results/somatic_snvs_and_indels_final.txt \
+./data/somatic_snvs_and_indels_final.txt
+
+# Compare the files from my filtered SNVs to Andrey's lenient filtered variants
+
+python ./scripts/compare_somatic_snvs_indels_rna2dna.py
+
+# ./scripts/compare_somatic_snvs_indels_rna2dna.py
+##################################################
+import sys
+import os
+
+# Input files
+dna_file = open("./data/somatic_snvs_and_indels_final.txt") 
+rna_file = open("./data/wgs_rnaseq_overlap_r4indel_filter6_header.txt")
+
+for dna_line in dna_file:
+	dna_line = dna_line.rstrip()
+	if dna_line[0] != '#':
+		dna_col = dna_line.split('\t')
+		dna_chr = dna_col[0]
+		dna_pos = dna_col[1]
+		dna_tsn = dna_col[8]
+		dna_samples = dna_col[9]
+		if dna_tsn == '1':
+			dna_sample = dna_col[9]
+			#print(dna_chr + '\t' + dna_pos + '\t' + dna_tsn + '\t' + dna_sample + '\n')
+			for rna_line in rna_file:
+				rna_line = rna_line.rstrip()
+				if rna_line != '#':
+					rna_col = rna_line.split('\t')
+					rna_chr = rna_col[4]
+					rna_pos = rna_col[5]
+					print('rna_chr ' + rna_chr)
+					print('rna_pos ' + rna_pos)
+					print('dna_chr ' + dna_chr)
+					print('dna_pos ' + dna_pos)
+					if rna_chr == dna_chr and rna_pos == dna_pos:
+						print(dna_line)
+						print(rna_line + '\n')
+
+
+##################################################
+
+# These comparisons were very liberal, just comparing the chromosomes and positions from both files' calls, and yet not a single match.
+# Likely a difference between genome builds. Will check genome builds of Rutgers calls next.
+
+
+
+
