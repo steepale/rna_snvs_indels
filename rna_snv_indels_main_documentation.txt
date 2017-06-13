@@ -1,0 +1,637 @@
+#===============================================================================
+#
+#         FILE:  /mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels/scripts/rna_snv_indels_main_documentation.txt
+#
+#        USAGE:  for documentation purposes, scripts inside
+#
+#  DESCRIPTION:  This script serves as a step by step documentation script and development script for calling SNVs and Indels from rna and comparing them to DNA calls
+#                
+# REQUIREMENTS:  ---
+#        NOTES:  ---
+#       AUTHOR:  Alec Steep, steepale@msu.edu
+#  AFFILIATION:  Michigan State University (MSU), East Lansing, MI, United States
+#				         USDA ARS Avian Disease and Oncology Lab (ADOL), East Lansing, MI, United States
+#				         Technical University of Munich (TUM), Weihenstephan, Germany
+#      VERSION:  1.0
+#      CREATED:  2017.04.13
+#     REVISION:  
+#===============================================================================
+
+# Permanent PROJECT DIRECTORY (MacBook Pro)
+cd /mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels
+
+# Transfer the custom filtered and final somatic SNV and INDEL text file from TUM cluster to msuhpcc
+rsync -avp \
+a.steep@barcelona.binfo.wzw.tum.de:/home/proj/MDW_genomics/steepale/pathway_analysis/results/somatic_snvs_and_indels_final.txt \
+./data/somatic_snvs_and_indels_final.txt
+
+# Compare the files from my filtered SNVs to Andrey's lenient filtered variants
+
+python ./scripts/compare_somatic_snvs_indels_rna2dna.py
+
+# ./scripts/compare_somatic_snvs_indels_rna2dna.py
+##################################################
+import sys
+import os
+
+# Input files
+dna_file = open("./data/somatic_snvs_and_indels_final.txt") 
+rna_file = open("./data/wgs_rnaseq_overlap_r4indel_filter6_header.txt")
+
+for dna_line in dna_file:
+	dna_line = dna_line.rstrip()
+	if dna_line[0] != '#':
+		dna_col = dna_line.split('\t')
+		dna_chr = dna_col[0]
+		dna_pos = dna_col[1]
+		dna_tsn = dna_col[8]
+		dna_samples = dna_col[9]
+		if dna_tsn == '1':
+			dna_sample = dna_col[9]
+			#print(dna_chr + '\t' + dna_pos + '\t' + dna_tsn + '\t' + dna_sample + '\n')
+			for rna_line in rna_file:
+				rna_line = rna_line.rstrip()
+				if rna_line != '#':
+					rna_col = rna_line.split('\t')
+					rna_chr = rna_col[4]
+					rna_pos = rna_col[5]
+					print('rna_chr ' + rna_chr)
+					print('rna_pos ' + rna_pos)
+					print('dna_chr ' + dna_chr)
+					print('dna_pos ' + dna_pos)
+					if rna_chr == dna_chr and rna_pos == dna_pos:
+						print(dna_line)
+						print(rna_line + '\n')
+
+
+##################################################
+
+# These comparisons were very liberal, just comparing the chromosomes and positions from both files' calls, and yet not a single match.
+# Likely a difference between genome builds. Will check genome builds of Rutgers calls next.
+
+# Rutgers has requested that I provide my variant's positions and accompanying sequence, 100 bp on each side.
+# Continue work on TUM cluster
+cd /home/proj/MDW_genomics/steepale/rna_snvs_indels
+
+# Copy list of high confidence somatic variants from validation project folder
+cp /home/proj/MDW_genomics/steepale/illumina_validation/data/somatic_snvs_and_indels_final_priority.txt ./data/
+
+# Run through the file and capture the consensus sequence from the exact bam file the variants are found in
+# Obtian th 100 bp flanking regions up- and down-stream from each somatic variant in it's respective tumor bam file
+python ./scripts/somatic_snvs_indels_flanking_regions_uniq_tumor_bam.py \
+./data/somatic_snvs_and_indels_final_priority.txt \
+./data/somatic_snvs_indels_flanking_100bp_uniq_tumors.txt
+
+# ./scripts/somatic_snvs_indels_flanking_regions_uniq_tumor_bam.py
+#####################################
+import sys
+import os
+from os import listdir
+import subprocess
+from subprocess import check_output
+import re
+import time
+from difflib import SequenceMatcher
+from Bio import motifs
+from Bio.Seq import Seq
+from pyfaidx import FastaVariant
+
+# infile
+infile = sys.argv[1]
+
+# reference files
+galgal5_fa = "/home/proj/MDW_genomics/steepale/galgal5/galgal5.fa"
+
+# Add bam files to set
+bams = set()
+for bamfile in listdir("/home/proj/MDW_genomics/xu/final_bam"):
+	if re.search("bam$", bamfile):
+		bams.add("/home/proj/MDW_genomics/xu/final_bam/" + bamfile)
+
+# outfiles
+outfile = open(sys.argv[2], 'w')
+delinquent_file = open("./data/delinquent_sequences_vars.txt" , 'w')
+
+# Create a header for output file
+outfile.write('#Explanation of headers' + '\n')	
+outfile.write('#CHROM:'+' '+'Chromosome' + '\n')
+outfile.write('#POS:'+' '+'Position(s)' + '\n')
+outfile.write('#REF:'+' '+'Reference allele' + '\n')
+outfile.write('#ALT:'+' '+'Alternative allele' + '\n')
+outfile.write('#VARIANT_TYPE:'+' '+'Mutation type' + '\n')
+outfile.write('#SAMPLE:'+' '+'Samples with mutation' + '\n')
+outfile.write('#DOWNSTREAM_POS:'+' '+'Downstream region of 100 bp flanking region' + '\n')
+outfile.write('#UPSTREAM_POS:'+' '+'Upstream region of 100bp flanking region' + '\n')
+outfile.write('#CONSENSUS_SEQ_100BP_DOWNSTREAM:'+' '+'Downstream 100bp flanking sequence as a IUPAC flanking sequence' + '\n')
+outfile.write('#SOMATIC_VARIANT:'+' '+'The sequence of the alternative allele but in a unique format' + '\n')
+outfile.write('#CONSENSUS_SEQ_100BP_UPSTREAM:'+' '+'Upstream 100bp flanking sequence as a IUPAC flanking sequence' + '\n')
+outfile.write('#SIMILARITY:'+' '+'Similarity of consensus sequences to reference sequence counterparts' + '\n')
+outfile.write('#CHROM'+'\t'+'POS'+'\t'+'REF'+'\t'+'ALT'+'\t'+'VARIANT_TYPE'+'\t'+'SAMPLE'+'\t'+'DOWNSTREAM_POS'+'\t'+'UPSTREAM_POS'+'\t'+'CONSENSUS_SEQ_100BP_DOWNSTREAM'+'\t'+'SOMATIC_VARIANT'+'\t'+'CONSENSUS_SEQ_100BP_UPSTREAM'+'\t'+'SIMILARITY'+'\n')
+
+# Function for sequence matching similarity
+def similar(a, b):
+    return SequenceMatcher(None, a, b).ratio()
+
+# Define sets
+delinq_set = set()
+var2sam2flank_set = set()
+
+# iterate through infile and capture variables
+for inline in open(infile):
+	if inline[0] != '#':
+		inline = inline.rstrip()
+		incol = inline.split('\t')
+		inchr = incol[0]
+		inpos = incol[1]
+		inref = incol[2]
+		inalt = incol[3]
+		invar = inchr +'\t'+ inpos +'\t'+ inref +'\t'+ inalt
+		insample = incol[11]
+		sam = insample.split(';')
+		# write the int variant file in basic bed format for a single variant position from reference sequence
+		if len(inref) == 1 and len(inalt) == 1:
+			inmut = 'SNV'
+			start_var = int(inpos) - 1
+			end_var = int(inpos)
+			som_var = inalt
+		elif len(inref) > 1:
+			inmut = 'DEL'
+			start_var = int(inpos) - 1
+			end_var = int(inpos) + len(inref) - 1
+			som_var = inref[0] + '-'*(len(inref) - 1)
+		elif len(inalt) > 1:
+			inmut = 'INS'
+			start_var = int(inpos) - 1
+			end_var = int(inpos) + len(inalt) - 1
+			som_var = inref[0] + '+'*(len(inalt) -1)
+		outfile_bed = "./data/somatic_var_bed.bed"
+		outfile_bed = open(outfile_bed, 'w')
+		outfile_bed.write(inchr + '\t' + str(start_var) + '\t' + str(end_var) + '\n')
+		outfile_bed.close()
+		# Use samtools mpileup to query the galgal5 reference file
+		bedtools_var_cmd = "bedtools getfasta -fi "+galgal5_fa+" -bed ./data/somatic_var_bed.bed"
+		# Use subprocess.Popen to ellicit shell commands 
+		bedtools_var_proc = subprocess.Popen([bedtools_var_cmd], stdout=subprocess.PIPE, shell=True)
+		# Use communicate to capture the output in a 'bytes' object
+		(var_out, var_err) = bedtools_var_proc.communicate()
+		# Decode the 'bytes' object to a string
+		bedtools_var_out = var_out.decode("utf-8").rstrip().split('\n')[1]
+		ref_var_out = bedtools_var_out
+		#print('Variant' +' \t' + invar + '\t' + inmut)
+		#print('ref_var_out ' + ref_var_out)
+
+		# write the int downstream file in basic bed format for 100 bp downstream of single var position from reference sequence
+		# For each upstream and downstream sequence:
+		for sample in sam:
+			for flank in ['up', 'down']:
+				if flank == 'up':
+					start_flank_0 = int(inpos) + len(inref) - 1
+					end_flank_0 = start_flank_0 + 100
+					start_flank_1 = start_flank_0 + 1
+					end_flank_1 = end_flank_0 + 1
+				elif flank == 'down':
+					start_flank_0 = start_var - 100
+					end_flank_0 = start_var
+					start_flank_1 = start_var - 100
+					end_flank_1 = start_var
+				# Create the bed file to query tumor bam
+				outfile_flank = "./data/somatic_var_flank.bed"
+				outfile_flank = open(outfile_flank, 'w')
+				outfile_flank.write(inchr + '\t' + str(start_flank_0) + '\t' + str(end_flank_0) + '\n')
+				outfile_flank.close()
+				# Bedtools getfasta command
+				bedtools_flank_cmd = "bedtools getfasta -fi "+galgal5_fa+" -bed ./data/somatic_var_flank.bed"
+				# Use subprocess.Popen to ellicit shell commands 
+				bedtools_flank_proc = subprocess.Popen([bedtools_flank_cmd], stdout=subprocess.PIPE, shell=True)
+				# Use communicate to capture the output in a 'bytes' object
+				(flank_out, flank_err) = bedtools_flank_proc.communicate()
+				# Decode the 'bytes' object to a string
+				ref_flank_out = flank_out.decode("utf-8").rstrip().split('\n')[1]
+				# Iterate over bam files to collect downstream primer sequence for each sample
+				for bamfile in bams:
+					var2sam2flank = invar + sample + flank
+					if re.search(sample, bamfile) and var2sam2flank not in var2sam2flank_set:
+						# Add variants and associated tumor sample to set to avoid redundency
+						var2sam2flank_set.add(var2sam2flank)
+						# Create a samtools command to create a intermediate bam file of region of interest
+						samtools_view_cmd = "samtools view -ub "+bamfile+" "+inchr+":"+str(start_flank_1)+"-"+str(end_flank_1)+" > ./data/int_flank.bam"
+						os.system(samtools_view_cmd)
+						samtools_index_cmd = "samtools index ./data/int_flank.bam"
+						os.system(samtools_index_cmd)
+						# Samtools and mpileup work together to call variants at region of interest
+						samtools_mpileup_flank_cmd = "samtools mpileup -uf "+galgal5_fa+" ./data/int_flank.bam -d 5000 | bcftools call -c -Oz -o ./data/int_flank.vcf.gz"
+						os.system(samtools_mpileup_flank_cmd)
+						# Tabix index the vcf
+						tabix_flank_cmd = "tabix -f -p vcf ./data/int_flank.vcf.gz"
+						os.system(tabix_flank_cmd)
+						# Filter low quality calls
+						filter_cmd = "bcftools filter -O z -o ./data/int_flank_filter.vcf.gz -s LOWQUAL -i'%QUAL>10' ./data/int_flank.vcf.gz"
+						os.system(filter_cmd)
+						# Index again
+						tabix_filter_cmd = "tabix -f -p vcf ./data/int_flank_filter.vcf.gz"
+						os.system(tabix_filter_cmd)
+
+						# Determine the consensus sequence of the region of interest using ref chr and vcf file
+						with FastaVariant("/home/proj/MDW_genomics/steepale/galgal5/contig_fastas/"+inchr+".fa", './data/int_flank_filter.vcf.gz', het=True, hom=True) as consensus:
+							for chromosome in consensus:
+								if flank == 'down':
+									site = int(end_flank_1)
+								elif flank == 'up':
+									site = int(end_flank_1 - 1)
+								bam_flank_100 = chromosome[site-100:site]
+								final_flank_out = bam_flank_100.seq
+								# Check for the accuracy of each sample's 100bp sequence with that of the reference sequence
+								similarity = similar(ref_flank_out, final_flank_out)
+							if similarity < 1  and flank == 'down' and invar not in delinq_set:
+								delinq_set.add(invar)
+								delinquent_file.write('\n' + invar + '\n')
+								delinquent_file.write('Downstream Reference Sequence:' + '\n' + ref_flank_out + '\n')
+								delinquent_file.write(bamfile + ' SIMILARITY: ' + str(similarity) + '\n' + final_flank_out + '\n')
+							elif similarity < 1 and flank == 'down' and invar in delinq_set:
+								delinquent_file.write(bamfile + ' SIMILARITY: ' + str(similarity) + '\n' + final_flank_out + '\n')
+							if similarity < 1  and flank == 'up' and invar not in delinq_set:
+								delinq_set.add(invar)
+								delinquent_file.write('\n' + invar + '\n')
+								delinquent_file.write('Upstream Reference Sequence:' + '\n' + ref_flank_out + '\n')
+								delinquent_file.write(bamfile + ' SIMILARITY: ' + str(similarity) + '\n' + final_flank_out + '\n')
+							elif similarity < 1 and flank == 'up' and invar in delinq_set:
+								delinquent_file.write(bamfile + ' SIMILARITY: ' + str(similarity) + '\n' + final_flank_out + '\n')
+							# create a IUPAC consensus sequence
+							consensus_flank = final_flank_out
+							if flank == 'up':
+								consensus_upstream = str(consensus_flank)
+								similarity_up = similar(ref_flank_out, consensus_upstream)
+								upstream_pos = inchr+':'+str(start_flank_1)+'-'+str(end_flank_1 - 1)
+							elif flank == 'down':
+								consensus_downstream = str(consensus_flank)
+								similarity_down = similar(ref_flank_out, consensus_downstream)
+								downstream_pos = inchr+':'+str(start_flank_1 + 1)+'-'+str(end_flank_1)
+
+			outfile.write(inchr+'\t'+inpos+'\t'+inref+'\t'+inalt+'\t'+inmut+'\t'+sample+'\t'+downstream_pos+'\t'+upstream_pos+'\t'+consensus_downstream+'\t'+som_var+'\t'+consensus_upstream+'\t'+str(similarity_down)+';'+str(similarity_up)+'\n')
+
+outfile.close()
+########################	
+
+
+# Objective: To look through RNAseq aligned files for non-synonymous variatns that were called via WGS analysis
+
+# Working directory
+cd /mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels
+
+# Rsync final somatic non-synonymous snv and indel calls from WGS sequencing analysis
+# Needs to be done from illumina validation directory in TUM cluster because of VPN security
+rsync -avp /home/proj/MDW_genomics/steepale/illumina_validation/data/somatic_snvs_and_indels_final_priority.txt \
+steepale@rsync.hpcc.msu.edu:/mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels/data/
+
+# rsync necessary reference files from TUM cluster
+rsync -avp /home/users/a.steep/databases/samples/germline_samples_rnaseq_2014_017NNN.txt \
+steepale@rsync.hpcc.msu.edu:/mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels/data/
+rsync -avp /home/users/a.steep/databases/samples/tumor_sample_dnaseq_list_NNN-N_SN.txt \
+steepale@rsync.hpcc.msu.edu:/mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels/data/
+
+# Create tumor samples in rnaseq annotation format
+find /mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/RNA_DE/data/ -name "*_paired_norRNA_sorted.bam" | \
+xargs -i basename {} | \
+sed 's/_paired_norRNA_sorted.bam//' | \
+sort | uniq | grep "-" > ./data/tumor_samples_rnaseq_2014_017NNN-N.txt
+
+# For samtools inqueries to work, the bam files need to be resorted and indexed with picard.
+find /mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/RNA_DE/data/ -name "*_paired_norRNA_sorted.bam" | \
+xargs -i basename {} | \
+sed 's/_paired_norRNA_sorted.bam//' | \
+sort | uniq | \
+xargs -i echo 'qsub ./scripts/sort_and_index_bams.sh -v Var='{} |sh
+
+# ./scripts/sort_and_index_bams.sh
+##############################
+#!/bin/bash -login
+#PBS -l nodes=1:ppn=2,walltime=01:00:00,mem=20gb
+#PBS -j oe
+
+# working directory:
+cd /mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/rnaseq_somatic_snvs_indels
+
+# copy appropriate bame file
+cp '/mnt/research/ADOL/OutsideCollaborations/20160201_Cheng_Steep_Xu_Zhang/RNA_DE/data/'${Var}'/'${Var}'_paired_norRNA_sorted.bam' \
+./data/
+
+# Load picardtools
+module load picardTools/1.113
+
+# Sort the bam
+java -Xmx18g -jar $PICARD/SortSam.jar \
+INPUT='./data/'${Var}'_paired_norRNA_sorted.bam' \
+OUTPUT='./data/'${Var}'_paired_norRNA_sorted_picard.bam' \
+SORT_ORDER=coordinate
+
+# Index newly sorted bam
+java -Xmx18g -jar $PICARD/BuildBamIndex.jar \
+INPUT='./data/'${Var}'_paired_norRNA_sorted_picard.bam' \
+OUTPUT='./data/'${Var}'_paired_norRNA_sorted_picard.bai'
+
+# Remove copied bam file
+rm './data/'${Var}'_paired_norRNA_sorted.bam'
+
+qstat -f ${PBS_JOBID}
+##############################
+#(head -n20 ./data/somatic_snvs_and_indels_final_priority.txt; grep "IKZF1" ./data/somatic_snvs_and_indels_final_priority.txt) > ./data/somatic_snvs_and_indels_final_priority_IKZF1.txt
+
+(grep "^#" ./data/somatic_snvs_and_indels_final_priority.txt; \
+grep -v "^#" ./data/somatic_snvs_and_indels_final_priority.txt | head -n150) > \
+./data/somatic_snvs_and_indels_final_priority_n150.txt
+
+# Query the RNAseq bam files for the presence of WGS non-synonymous snvs and indels
+python3 ./scripts/query_rnaseq_for_wgs_vars.py \
+./data/somatic_snvs_and_indels_final_priority.txt \
+./data/somatic_snvs_and_indels_shared_dna_rna.int
+
+# ./scripts/query_rnaseq_for_wgs_vars.py
+##############################
+import sys
+import os
+import re
+import subprocess
+from subprocess import check_output
+
+# General Strategy of script:
+
+# Filters include:
+
+# Input SNV and INDEL file
+infile = open(sys.argv[1], 'r')
+
+# Output file
+outfile = open(sys.argv[2], 'w')
+
+# Reference files
+tumor_birds_file = "./data/tumor_samples_rnaseq_2014_017NNN-N.txt"
+germline_birds_file = "./data/germline_samples_rnaseq_2014_017NNN.txt"
+tumor_dnaseq_file = "./data/tumor_sample_dnaseq_list_NNN-N_SN.txt"
+
+# Create a dictionary of germline rnaseq bam files
+germline_bam_file = {}
+for gbird in open(germline_birds_file):
+	gbird = gbird.rstrip()
+	germline_bam_file[gbird] = './data/'+gbird+'_paired_norRNA_sorted_picard.bam'
+
+# Create a dictionary of tumor bam files
+tum_bam_file = {}
+for tum_bird in open(tumor_birds_file):
+	tum_bird = tum_bird.rstrip()
+	tum_bam_file[tum_bird] = './data/'+tum_bird+'_paired_norRNA_sorted_picard.bam'
+
+# Create a dictionary of sample annotation to adjust annotation
+sample_ann = {}
+for s_short in open(tumor_dnaseq_file):
+	s_short = s_short.rstrip()
+	for s_long in open(tumor_birds_file):
+		s_long = s_long.rstrip()
+		if s_short.split('_S')[0] == s_long.split('017')[1]:
+			sample_ann[s_short] = s_long
+
+# Create another dictionary with the exact tumor bam
+#tumor_bam_file = {}
+#tumor_bam_file[tbird] = '/home/proj/MDW_genomics/xu/final_bam/' + tbird + '_Bwa_RG_dedupped_realigned.bam'
+
+# Write header to outfile
+outfile.write('##CHROM: Chromosome' + '\n')
+outfile.write('##POS: Position(s)' + '\n')
+outfile.write('##RS_ID: Reference SNP ID number (rs ID)' + '\n')
+outfile.write('##REF: Reference allele' + '\n')
+outfile.write('##ALT: Alternative allele' + '\n')
+outfile.write('##VAR_ID: Custom annotation of variant (6x7MDSNP01_000001000: line 6x7, Mareks Disease, chr1, pos1000)' + '\n')
+outfile.write('##VAR_TYPE: Mutation type' + '\n')
+outfile.write('##IMPACT: VEP predicted functional impact' + '\n')
+outfile.write('##SYMBOL: Ensembl gene symbol' + '\n')
+outfile.write('##GENE_ID: Ensembl gene id' + '\n')
+outfile.write('##ORTHOLOGUE: High-confidence ensembl chicken to human orthologue' + '\n')
+outfile.write('##TSN_VAR_DNA: Number of tumors with specific mutation in whole genome sequencing data' + '\n')
+outfile.write('##TSN_GENE_DNA: Number of tumors with mutations in gene in whole genome sequencing data' + '\n')
+outfile.write('##SAMPLE_DNA: Samples with mutation in whole genome sequencing data' + '\n')
+outfile.write('##VAC_DNA: Variant allele count in whole genome sequencing data' + '\n')
+outfile.write('##VAF_DNA: Variant allele frequency in whole genome sequencing data' + '\n')
+outfile.write('##NUM_TOOLS: Number of variant callers that predicted variant' + '\n')
+outfile.write('##CGC_STATUS: Whether the mutated gene is in COSMICs Cancer Gene Consensus' + '\n')
+outfile.write('##FILTER: Filter used for prioritizing variants' + '\n')
+outfile.write('#CHROM'+'\t'+'POS'+'\t'+'RS_ID'+'\t'+'REF'+'\t'+'ALT'+'\t'+'VAR_ID'+'\t'+'VAR_TYPE'+'\t'+'IMPACT'+'\t'+'SYMBOL'+'\t'+'GENE_ID'+'\t'+'ORTHOLOGUE'+'\t'+'TSN_VAR_DNA'+'\t'+'TSN_VAR_RNA'+'\t'+'TSN_GENE_DNA'+'\t'+'SAMPLE_DNA'+'\t'+'SAMPLE_RNA'+'\t'+'VAC_DNA'+'\t'+'VAC_RNA'+'\t'+'VAF_DNA'+'\t'+'VAF_RNA'+'\t'+'NUM_TOOLS'+'\t'+'CGC_STATUS'+'\t'+'FILTER'+'\n')
+
+# Iterate over lines in input file and perform custom filtering
+for inline in infile:
+	if inline[0] != '#':
+		inline = inline.rstrip()
+		cols = inline.split('\t')
+		chrom = cols[0]
+		pos = cols[1]
+		rs_id = cols[2]
+		ref = cols[3]
+		alt = cols[4]
+		var = chrom + '\t' + pos + '\t' + ref + '\t' + alt
+		var_id = cols[5]
+		var_type = cols[6]
+		impact = cols[7]
+		symbol = cols[8]
+		gene_id = cols[9]
+		orthologue = cols[10]
+		tsn_var_dna = cols[11]
+		tsn_gene_dna = cols[12]
+		sample_dna = cols[13]
+		vac_dna = cols[14]
+		vaf_dna = cols[15]
+		num_tools = cols[16]
+		cgc_status = cols[17]
+		filter_prior = cols[18]
+		# Determine if insertion, deletion, or snv
+		if len(alt) > len(ref):
+			var_type = 'INS'
+		elif len(alt) < len(ref):
+			var_type = 'DEL'
+		elif len(alt) == len(ref):
+			var_type = 'SNV'
+		# Create samtools annotation for insertion
+		if var_type == 'INS':
+			ins_length = len(alt) - len(ref) 
+			ins_samtools_str = '+' + str(ins_length) + alt[-ins_length:]
+		# Create samtools annotation for deletion
+		elif var_type == 'DEL':
+			del_length = len(ref) - len(alt)
+			del_samtools_str = 'N' * del_length
+		# Apply samples
+		for pre_sample in sample_dna.split(';'):
+			# Only apply script to samples that underwent RNASeq analysis
+			if pre_sample in sample_ann.keys():
+				sample = sample_ann[pre_sample]
+				# Create counter for each germline and tumor bam file with variant at sufficient VAF and set to zero
+				germ_sam_set = set()
+				# Create coverage variables
+				same_tumor_cov = "no"
+				gleich_germline_cov = "no"
+				# Reset all variables
+				gleich_tumor_status = 'no'
+				same_germline_status = 'no'
+				tumor_in_germline_out = 'no'
+				# Search each germline bam file for the variant
+				for g_bird, germline_bam in germline_bam_file.items():
+					#print(g_bird)
+					# Set all counting variables to zero
+					g_mpu_bases = ''
+					g_mpu_depth = 0
+					g_VAC = 0
+					g_VAF = 0
+					# Use samtools mpileup to show the actually mapped bases in the RNASeq BAM files
+					# Each base needs to have a base quality of atleast 20 and a mapping quality of atleast 20
+					g_samtools_cmd = 'samtools mpileup --min-MQ 20 --min-BQ 20 -r ' + chrom+':'+pos+'-'+pos+' '+germline_bam
+					# Use subprocess.Popen to ellicit shell commands 
+					g_samtools_proc = subprocess.Popen([g_samtools_cmd], stdout=subprocess.PIPE, shell=True)
+					# Use communicate to capture the output in a 'bytes' object
+					(g_out, g_err) = g_samtools_proc.communicate()
+					# Decode the 'bytes' object to a string
+					g_mpu_out = g_out.decode("utf-8")
+					g_mpu = g_mpu_out.rstrip()
+					#print(g_mpu)
+					# If the germline sample and tumor samples match and there is an output from samtools mpileup
+					if g_bird[0:3] == sample[0:3] and g_mpu != '' and g_mpu.split('\t')[3] != '0':
+						# Collect variables on matching germline sample
+						same_bird = sample
+						same_mpu_chrom = g_mpu.split('\t')[0]
+						same_mpu_pos = g_mpu.split('\t')[1]
+						same_mpu_ref = g_mpu.split('\t')[2]
+						same_mpu_depth = int(g_mpu.split('\t')[3])
+						same_mpu_bases = g_mpu.split('\t')[4].upper()
+						if var_type == 'INS':
+							same_VAC = same_mpu_bases.count(ins_samtools_str)
+						elif var_type == 'DEL':
+							same_VAC = same_mpu_bases.count(del_samtools_str)
+						elif var_type == 'SNV':
+							same_VAC = same_mpu_bases.count(alt)
+						same_VAF = same_VAC/same_mpu_depth
+						# If the Variant allele frequency and coverage of the germline is atleast 0.05 and 4, respectively, then consider site
+						if same_VAF >= 0.05 and same_mpu_depth >= 10:
+							germ_sam_set.add(g_bird)
+							same_germline_status = 'yes'
+						# Create a variable to express adequate coverage for paired germline sample
+						# ADJUSTMENT: We don't need adequate coverage from germline samples for RNASeq
+						#if same_mpu_depth >= 10:
+						#	same_tumor_cov = "yes"
+						#else:
+						#	same_tumor_cov = "no"
+					# For germline samples that displayed coverage but did not match to the tumor sample as a paired sample
+					elif g_bird[0:3] != sample[0:3] and g_mpu != '' and g_mpu.split('\t')[3] != '0':
+						g_mpu_chrom = g_mpu.split('\t')[0]
+						g_mpu_pos = g_mpu.split('\t')[1]
+						g_mpu_ref = g_mpu.split('\t')[2]
+						g_mpu_depth = int(g_mpu.split('\t')[3])
+						g_mpu_bases = g_mpu.split('\t')[4].upper()
+						if var_type == 'INS':
+							g_VAC = g_mpu_bases.count(ins_samtools_str)
+						elif var_type == 'DEL':
+							g_VAC = g_mpu_bases.count(del_samtools_str)
+						elif var_type == 'SNV':
+							g_VAC = g_mpu_bases.count(alt)
+						g_VAF = g_VAC/g_mpu_depth
+						# Add to counter for each germline file with variant at sufficient VAF
+						if g_VAF >= 0.10:
+							germ_sam_set.add(g_bird)
+				# Create empty dictionary for tumor values
+				# Create a dictionary with samples as keys and a list with VAC and VAF as value for input tumor sample
+				sam2VACVAF = {}
+				# Create empty list variables
+				tumor_sample_list = []
+				VAC_list = []
+				VAF_list = []
+				# Search input tumor bam for each somatic called variant
+				for t_bird, tumor_bam in tum_bam_file.items():
+					# Use samtools mpileup to show the actually mapped bases in the original BAM files
+					# Each base needs to have a base quality of atleast 20 and a mapping quality of atleast 20
+					t_samtools_cmd = 'samtools mpileup --min-MQ 20 --min-BQ 20 -r ' + chrom+':'+pos+'-'+pos+' '+tumor_bam
+					t_samtools_proc = subprocess.Popen([t_samtools_cmd], stdout=subprocess.PIPE, shell=True)
+					(t_out, t_err) = t_samtools_proc.communicate()
+					t_mpu_out = t_out.decode("utf-8")
+					t_mpu = t_mpu_out.rstrip()
+					#print(t_bird)
+					#print(t_mpu)
+					# If the tumor is the input tumor and there is sufficient coverage
+					if t_bird == sample and t_mpu != '' and t_mpu.split('\t')[3] != '0':
+						#print('t_bird ' + t_bird)
+						#print('sample ' + sample)
+						gleich_bird = sample
+						gleich_mpu_chrom = t_mpu.split('\t')[0]
+						gleich_mpu_pos = t_mpu.split('\t')[1]
+						gleich_mpu_ref = t_mpu.split('\t')[2]
+						gleich_mpu_depth = int(t_mpu.split('\t')[3])
+						gleich_mpu_bases = t_mpu.split('\t')[4].upper()
+						if var_type == 'INS':
+							gleich_VAC = gleich_mpu_bases.count(ins_samtools_str)
+						elif var_type == 'DEL':
+							gleich_VAC = gleich_mpu_bases.count(del_samtools_str)
+						elif var_type == 'SNV':
+							gleich_VAC = gleich_mpu_bases.count(alt)
+						gleich_VAF = gleich_VAC/gleich_mpu_depth
+						#print(t_mpu)
+						#print('VAC ' + str(gleich_VAC))
+						#print('Depth ' + str(gleich_mpu_depth))
+						#print('VAF ' + str(gleich_VAF))
+						# If there variant allele frequency and coverage are sufficient
+						if gleich_VAF >= 0.05 and gleich_mpu_depth >= 10:
+							gleich_tumor_status = 'yes'
+							sam2VACVAF[t_bird] = [str(gleich_VAC), str(gleich_VAF)[0:5]]
+						if gleich_mpu_depth >= 10:
+							gleich_germline_cov = "yes"
+						else:
+							gleich_germline_cov = "no"
+					# Else if tumor is not the input tumor but there is sufficient coverage
+					elif t_bird != sample and t_mpu != '' and t_mpu.split('\t')[3] != '0':
+						anders_bird = t_bird
+						anders_mpu_chrom = t_mpu.split('\t')[0]
+						anders_mpu_pos = t_mpu.split('\t')[1]
+						anders_mpu_ref = t_mpu.split('\t')[2]
+						anders_mpu_depth = int(t_mpu.split('\t')[3])
+						anders_mpu_bases = t_mpu.split('\t')[4].upper()
+						if var_type == 'INS':
+							anders_VAC = anders_mpu_bases.count(ins_samtools_str)
+						elif var_type == 'DEL':
+							anders_VAC = anders_mpu_bases.count(del_samtools_str)
+						elif var_type == 'SNV':
+							anders_VAC = anders_mpu_bases.count(alt)
+						anders_VAF = anders_VAC/anders_mpu_depth
+						# If there variant allele frequency and coverage are sufficient
+						if anders_VAF >= 0.05 and anders_mpu_depth >= 10:
+							#anders_tumor_status = 'yes'
+							sam2VACVAF[t_bird] = [str(anders_VAC), str(anders_VAF)[0:5]]
+				# If stats pertain to the input tumor with site of adequate variant allele frequency and coverage,
+				# AND if the compared germline samples are not the matching samples of the tumor
+				if gleich_tumor_status == 'yes' and same_germline_status == 'no':
+					tumor_in_germline_out = 'yes'
+				else:
+					tumor_in_germline_out = 'no'
+				if symbol == '':
+					symbol = 'NA'
+				# print dictionary values in correct order
+				for sample, VACVAF in sam2VACVAF.items():
+					tumor_sample_list.append(sample)
+					VAC_list.append(VACVAF[0])
+					VAF_list.append(VACVAF[1])
+				# Turn the lists into proper variables
+				sample_rna = ';'.join(map(str,tumor_sample_list))
+				vac_rna = ';'.join(map(str,VAC_list))
+				vaf_rna = ';'.join(map(str,VAF_list))
+				# Perform final filters if..., 
+				# found at relevant variant allele freq in tumors
+				# not found in germline samples
+				# the input tumor sample shows adequate coverage
+				# the paired germline sample shows adequate coverage
+				if len(sam2VACVAF) > 0 and len(germ_sam_set) == 0 and gleich_germline_cov == 'yes' and tumor_in_germline_out == 'yes':
+					tsn_var_rna = str(len(sam2VACVAF))
+					outfile.write(chrom+'\t'+pos+'\t'+rs_id+'\t'+ref+'\t'+alt+'\t'+var_id+'\t'+var_type+'\t'+impact+'\t'+symbol+'\t'+gene_id+'\t'+orthologue+'\t'+tsn_var_dna+'\t'+tsn_var_rna+'\t'+tsn_gene_dna+'\t'+sample_dna+'\t'+sample_rna+'\t'+vac_dna+'\t'+vac_rna+'\t'+vaf_dna+'\t'+vaf_rna+'\t'+num_tools+'\t'+cgc_status+'\t'+filter_prior+'\n')
+outfile.close()
+###################################
+
+# Reduce redundent calls
+(grep "^#" ./data/somatic_snvs_and_indels_shared_dna_rna.int; \
+grep -v "^#" ./data/somatic_snvs_and_indels_shared_dna_rna.int | \
+sort | uniq) > ./data/somatic_snvs_and_indels_shared_dna_rna.txt
+
+
+
+
+
+
